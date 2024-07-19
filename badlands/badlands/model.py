@@ -1,4 +1,4 @@
-# Copyright 2019 Tristan Salles
+# Copyright 2019 Tristan Salles modified by LX
 #
 # Badlands is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Lesser General Public License as published by
@@ -18,11 +18,31 @@ Main components of **badlands** workflow.
 
 import time
 import numpy as np
+import os
+import copy
+import datetime
+from badlands import elevationTIN, buildMesh
+import pandas as pd
+import shutil
 
 from scipy.spatial import cKDTree
 
 import io
 import os
+
+# check if turn on lake level modification
+change_level = 0
+if change_level == 1:
+    print ('lake level modificaiton is on.')
+else:
+    print ('lake level modificaiton is off.')
+
+# copy this script first
+source = '/home/lxue07/anaconda3/lib/python3.9/site-packages/badlands/model.py'
+folder = '/home/lxue07/Documents/badlands/code/test/testlake/modelscript'
+timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+new_filename = f"backup_model_{timestamp}.py"
+shutil.copy2(source, os.path.join(folder, new_filename))
 
 if "READTHEDOCS" not in os.environ:
     from badlands import (
@@ -334,10 +354,14 @@ class Model(object):
 
         # Perform main simulation loop
         while self.tNow < tEnd:
+
+
             # At most, display output every 5 seconds
+            
             tloop = time.process_time() - last_time
+            #print("t2d, tNow = %s (step took %0.02f seconds)" % (self.tNow, tloop)) # check tNow XL
             if time.process_time() - last_output >= 5.0:
-                print("tNow = %s (step took %0.02f seconds)" % (self.tNow, tloop))
+                print("t1, tNow = %s (step took %0.02f seconds)" % (self.tNow, tloop))
                 last_output = time.process_time()
             last_time = time.process_time()
 
@@ -369,7 +393,8 @@ class Model(object):
                 ):
                     ldisp = np.zeros(self.totPts, dtype=float)
                     ldisp.fill(-1.0e6)
-                    ldisp[self.inIDs] = self.force.load_Tecto_map(self.tNow, self.inIDs)
+                    # load_Tecto_map: perform interpolation from regular grid to TIN one at this time interval - XL
+                    ldisp[self.inIDs] = self.force.load_Tecto_map(self.tNow, self.inIDs) 
                     self.disp = self.force.disp_border(
                         ldisp,
                         self.FVmesh.neighbours,
@@ -480,8 +505,10 @@ class Model(object):
                         if fero == 1:
                             self.mapero.Ke = Ke
                             self.mapero.thickness = Th
-                        # Rebuild the computational mesh
+                        # Rebuild the computational mesh, also 
+                        # recalculate the pit and using lake maxfill -XL
                         self._rebuild_mesh(verbose)
+                        print ('check is rebuild_mesh is used here')
 
                         # In case where the paleoflow workflow is used
                         if self.force.uDisp is not None:
@@ -679,7 +706,39 @@ class Model(object):
                     self.cumdiff += sub
                 outStrata = 0
 
-            # Compute stream network
+            # if self.tNow >0.4e6 and self.tNow < 0.6e6:
+            #     df = pd.DataFrame()
+            #     df['x'] = self.FVmesh.node_coords[:, 0]
+            #     df['y'] = self.FVmesh.node_coords[:, 1]
+            #     df['fillH'] = self.fillH
+            #     df['ele'] = self.elevation
+            #     df['sed'] = self.cumdiff
+            #     df.to_csv('testoutput/beforefill_{}.csv'.format(self.tNow))
+
+            # Compute stream network  # where the lake depth + elevation is first generated - XL
+            # check if change the lake level 
+             
+            if change_level == 1:
+                print ('lake depth: ', int(self.input.fillmax), ' m')
+                #curve = pd.read_csv('data/lake_level_curve_1my_twophase_rise.csv')
+                curve = pd.read_csv('data/lake_level_curve_1my.csv')
+                hist = curve['hist'].values
+                llchange = curve['llchange'].values
+                # find out lake level change in this step
+                ll_id = [i for i, num in enumerate(hist) if int(num) <= self.tNow][-1]
+                self.input.fillmax = llchange[ll_id]
+                elevationTIN.assign_parameter_pit(
+                self.FVmesh.neighbours,
+                self.FVmesh.control_volumes,
+                self.input.diffnb,
+                self.input.diffprop,
+                self.input.propa,
+                self.input.propb,
+                self.recGrid.boundsPt,
+                self.input.fillmax,
+                )
+
+            # regular stream flow function
             self.fillH, self.elevation = buildFlux.streamflow(
                 self.input,
                 self.FVmesh,
@@ -693,6 +752,146 @@ class Model(object):
                 self.tNow,
                 verbose,
             )
+            
+            # if lake change by extral function
+            #lake_change=0
+            # if lake_change ==1:
+            #     # #replace fillH with customized lake level data (method2 using output fillH)
+            #     # period = 1e6 # yr
+            #     # llmax = 400 #100 # m lake change maxmium 
+            #     # #self.input.fillmax = 20
+            #     # time_max = 1e6 # year
+            #     # n_step = 100
+            #     # # time
+            #     # hist = np.linspace(0, time_max, n_step, dtype = int)
+            #     # # lake level changes
+            #     # llchange = 0.5*llmax*np.sin(2*np.pi*hist/period- 0.5*np.pi) + 0.5*llmax  # only rise
+            #     # #llchange = 0.5*llmax*np.sin(2*np.pi*hist/period) # sin curve
+            #     # #llchange = -0.5*llmax*np.sin(2*np.pi*hist/period- 0.5*np.pi) -0.5*llmax # only drop 
+            #     # read the lake level data
+            #     curve = pd.read_csv('data/lake_level_curve_1my.csv')
+            #     #curve = pd.read_csv('data/lake_level_curve_1my_twophase_rise.csv')
+            #     hist = curve['hist'].values
+            #     llchange = curve['llchange'].values
+            #     df = pd.DataFrame()
+            #     # calculate lake thickness, only change regions where lake depth > 0
+            #     df['lake_depth'] = self.fillH - self.elevation
+            #     # find out lake level change in this step
+            #     ll_id = [i for i, num in enumerate(hist) if int(num) <= self.tNow][-1]
+            #     # print ('step ', ll_id, self.tNow, llchange[ll_id])
+            #     df['now_ll_change'] = 0 # make a new column
+            #     df.loc[df['lake_depth']>1, 'now_ll_change'] =  llchange[ll_id]
+            #     #df.to_csv('testoutput/beforefill_{}.csv'.format(self.tNow))
+
+            #     # add the rised lake level  
+            #     self.fillH = self.elevation + df['now_ll_change'].values
+            #     #self.fillH = self.fillH + df['now_ll_change'].values
+            #     # avoid  fillh bneath topograph
+            #     self.fillH = np.maximum(self.fillH,self.elevation)
+            #     # avoid fillh higher than topograph
+            #     # elemax = np.max(self.elevation)
+            #     # self.fillH = np.where(self.fillH>elemax, elemax, self.fillH)
+
+            #     # now try different functions in streamflow
+            #     fillH_fix = self.fillH
+
+            #     if self.tNow >0.4e6 and self.tNow < 0.6e6:
+            #         df = pd.DataFrame()
+            #         df['x'] = self.FVmesh.node_coords[:, 0]
+            #         df['y'] = self.FVmesh.node_coords[:, 1]
+            #         df['fillH'] = self.fillH
+            #         df['ele'] = self.elevation
+            #         df['sed'] = self.cumdiff
+            #         df.to_csv('testoutput/firstfill_{}.csv'.format(self.tNow))
+
+            #     # copy some information
+            #     testclass = copy.deepcopy(self)
+
+            #     # #################################################
+            #     # if self.input.tStart == self.tNow and self.input.nopit == 1:
+            #     #     self.fillH = self.elevationTIN.pit_stack(self.elevation, self.input.nopit, self.force.sealevel)
+            #     #     self.elevation = self.fillH
+            #     # else:
+            #     #     self.fillH = elevationTIN.pit_stack(fillH_fix, 0, self.force.sealevel)
+            #     # self.fillH = elevationTIN.pit_stack(fillH_fix, 0, self.force.sealevel)
+
+            #     # self.flow.SFD_receivers(self.fillH, fillH_fix, self.FVmesh.neighbours, 
+            #     #     self.FVmesh.vor_edges, self.FVmesh.edge_length, self.lGIDs)
+            #     # self.flow.maxh = 10*self.flow.maxh
+            #     # self.flow.maxdep = 10*self.flow.maxdep
+            #     # self.flow.localbase = self.flow.base
+            #     # self.flow.ordered_node_array_filled()
+            #     # self.flow.stack = self.flow.localstack
+            #     # self.flow.localbase1 = self.flow.base1
+            #     # self.flow.ordered_node_array_elev()
+            #     # self.flow.stack1 = self.flow.localstack1
+            #     # self.flow.compute_parameters_depression(
+            #     #    self.fillH, fillH_fix, self.FVmesh.control_volumes, 
+            #     #    self.force.sealevel)
+            #     # we need a loop to fully fill the depression of fillh
+            #     # when lake rise, there should be filling on the gap
+            #     # when lake drop there should be no fills
+            #     # 10 loops could be fine for a test of lake level rise of 200
+            #     #print (llchange[ll_id])
+            
+            #     if llchange[ll_id]>1e-3:
+            #         for i in range(10):
+            #             self.fillH, self.elevation = buildFlux.streamflow(
+            #                 self.input,
+            #                 self.FVmesh,
+            #                 self.recGrid,
+            #                 self.force,
+            #                 self.hillslope,
+            #                 self.flow,
+            #                 self.fillH,
+            #                 self.lGIDs,
+            #                 self.rain,
+            #                 self.tNow,
+            #                 verbose,
+            #             )
+            #     else:
+            #         #self.input.fillmax = 1
+            #         self.fillH, self.elevation = buildFlux.streamflow(
+            #         self.input,
+            #         self.FVmesh,
+            #         self.recGrid,
+            #         self.force,
+            #         self.hillslope,
+            #         self.flow,
+            #         self.fillH,
+            #         self.lGIDs,
+            #         self.rain,
+            #         self.tNow,
+            #         verbose,
+            #         )
+            #     print (self.input.fillmax)   
+            #     new_fill = self.fillH
+                
+            #     # test deep copy 
+            #     # self.elevation += 2000
+            #     ##############################################################
+
+            #     if self.tNow >0.4e6 and self.tNow < 0.6e6:
+            #         df = pd.DataFrame()
+            #         df['x'] = self.FVmesh.node_coords[:, 0]
+            #         df['y'] = self.FVmesh.node_coords[:, 1]
+            #         df['fillH'] = self.fillH
+            #         df['ele'] = self.elevation
+            #         df['sed'] = self.cumdiff
+            #         df.to_csv('testoutput/sefill_{}.csv'.format(self.tNow))
+
+            #     # copy back 
+            #     self = copy.deepcopy(testclass)
+            #     self.fillH = new_fill
+            #     if self.tNow >0.4e6 and self.tNow < 0.6e6:
+            #         df = pd.DataFrame()
+            #         df['x'] = self.FVmesh.node_coords[:, 0]
+            #         df['y'] = self.FVmesh.node_coords[:, 1]
+            #         df['fillH'] = self.fillH
+            #         df['ele'] = self.elevation
+            #         df['sed'] = self.cumdiff
+            #         df.to_csv('testoutput/thirdfill_{}.csv'.format(self.tNow))
+
 
             # Create checkpoint files and write HDF5 output
             if self.tNow >= self.force.next_display:
@@ -757,6 +956,7 @@ class Model(object):
                 ]
             )
 
+            #print("t2b, tNow = %s (step took %0.02f seconds)" % (self.tNow, tloop)) # check tNow XL
             if tStop < tEnd:
                 (
                     self.tNow,
@@ -765,7 +965,7 @@ class Model(object):
                     self.cumhill,
                     self.cumfail,
                     self.slopeTIN,
-                ) = buildFlux.sediment_flux(
+                ) = buildFlux.sediment_flux(    # this si where the tNow is updated as minDT in the loop XL 
                     self.input,
                     self.recGrid,
                     self.hillslope,
@@ -788,11 +988,24 @@ class Model(object):
                     tStop,
                     verbose,
                 )
+                #print("t2e, tNow = %s (step took %0.02f seconds)" % (self.tNow, tloop)) # check tNow XL
             else:
                 self.tNow = tEnd
+                #print("t2c, tNow = %s (step took %0.02f seconds)" % (self.tNow, tloop)) # check tNow XL
+
+            # output lake for the final step
+            # df = pd.DataFrame()
+            # df['x'] = self.FVmesh.node_coords[:, 0]
+            # df['y'] = self.FVmesh.node_coords[:, 1]
+            # df['fillH'] = self.fillH
+            # df['ele'] = self.elevation
+            # df.to_csv('data_{}.csv'.format(self.tNow))
+
+
+
 
         tloop = time.process_time() - last_time
-        print("tNow = %s (%0.02f seconds)" % (self.tNow, tloop))
+        print("t3, tNow = %s (%0.02f seconds)" % (self.tNow, tloop))
 
         # Isostatic flexure
         if self.input.flexure:
@@ -892,3 +1105,4 @@ class Model(object):
             if self.carbTIN is not None:
                 self.carbTIN.write_hdf5_stratigraphy(self.lGIDs, self.outputStep - 1)
                 self.carbTIN.step += 1
+
